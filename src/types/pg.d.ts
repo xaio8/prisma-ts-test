@@ -1,4 +1,3 @@
-// Fallback types for environments where `@types/pg` isn't picked up by the editor.
-// This keeps the sample project compiling even if the IDE diagnostics lag behind installs.
-declare module 'pg';
-
+// Type augmentations for pg are provided by @types/pg.
+// This file is intentionally left empty to avoid shadowing @types/pg.
+export {};

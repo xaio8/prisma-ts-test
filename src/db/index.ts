@@ -7,8 +7,11 @@ if (!connectionString) {
   throw new Error('Missing DATABASE_URL in environment (.env or .env.example).');
 }
 
-// In a real app, you'd tune pool size and enable migrations/health checks at startup.
-const pool = new Pool({ connectionString });
+export const pool = new Pool({
+  connectionString,
+  max: 20,
+  idleTimeoutMillis: 30_000,
+  connectionTimeoutMillis: 5_000
+});
 
 export const db = drizzle(pool);
-
