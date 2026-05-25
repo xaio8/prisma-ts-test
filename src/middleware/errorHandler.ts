@@ -1,21 +1,25 @@
 import type { NextFunction, Request, Response } from 'express';
+import { ZodError } from 'zod';
 import { appLogger } from '../logger';
 
 export function errorHandler(err: unknown, _req: Request, res: Response, _next: NextFunction) {
-  // Keep error responses safe and predictable for a sample project.
-  const message = err instanceof Error ? err.message : 'Internal Server Error';
-  const status = err instanceof HttpError ? err.statusCode : 500;
+  if (err instanceof ZodError) {
+    res.status(400).json({ error: { message: 'Validation failed', details: err.flatten() } });
+    return;
+  }
 
-  appLogger.error(`HTTP ${status}: ${message}`);
+  const status = err instanceof HttpError ? err.statusCode : 500;
+  const message =
+    err instanceof HttpError
+      ? err.message
+      : 'Internal Server Error';
+
+  appLogger.error(`HTTP ${status}: ${err instanceof Error ? err.message : String(err)}`);
   if (err instanceof Error && err.stack) {
     appLogger.error(err.stack);
   }
 
-  res.status(status).json({
-    error: {
-      message
-    }
-  });
+  res.status(status).json({ error: { message } });
 }
 
 export class HttpError extends Error {
@@ -26,4 +30,3 @@ export class HttpError extends Error {
     this.statusCode = statusCode;
   }
 }
-

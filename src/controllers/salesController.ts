@@ -1,9 +1,10 @@
 import type { NextFunction, Request, Response } from 'express';
 import { z } from 'zod';
-import { eq, inArray } from 'drizzle-orm';
+import { eq, inArray, sql } from 'drizzle-orm';
 import { db } from '../db';
 import { HttpError } from '../middleware/errorHandler';
-import { products, saleItems, sales, type SaleStatus, users } from '../db/schema';
+import { products, saleItems, sales, type SaleStatus, toNum, users } from '../db/schema';
+import { parsePagination, parseId } from '../utils/params';
 
 const createSaleSchema = z.object({
   userId: z.coerce.number().int().positive(),
@@ -59,12 +60,11 @@ async function getSaleDetails(saleId: number) {
 export const salesController = {
   async list(req: Request, res: Response, next: NextFunction) {
     try {
-      const limit = Math.min(Number(req.query.limit ?? 50), 200);
-      const offset = Math.max(Number(req.query.offset ?? 0), 0);
+      const { limit, offset } = parsePagination(req);
       const status = req.query.status;
 
       const where =
-        status === 'pending' || status === 'completed'
+        status === 'pending' || status === 'completed' || status === 'cancelled'
           ? eq(sales.status, status as SaleStatus)
           : undefined;
 
@@ -84,8 +84,7 @@ export const salesController = {
 
   async getById(req: Request, res: Response, next: NextFunction) {
     try {
-      const id = Number(req.params.id);
-      if (!Number.isInteger(id) || id <= 0) throw new HttpError(400, 'Invalid id');
+      const id = parseId(req);
       const sale = await getSaleDetails(id);
       res.json({ data: sale });
     } catch (err) {
@@ -97,10 +96,6 @@ export const salesController = {
     try {
       const input = createSaleSchema.parse(req.body);
       const status: SaleStatus = input.status ?? 'pending';
-
-      if (status !== 'pending' && status !== 'completed') {
-        throw new HttpError(400, 'Invalid status');
-      }
 
       const createdId = await db.transaction(async (tx) => {
         const [userRow] = await tx.select().from(users).where(eq(users.id, input.userId)).limit(1);
@@ -135,11 +130,20 @@ export const salesController = {
           const product = productById.get(productId);
           if (!product) throw new HttpError(400, 'One or more products not found');
 
-          const unitPrice = product.price;
+          const unitPrice = toNum(product.price);
           const lineTotal = Math.round(unitPrice * quantity * 100) / 100;
           total = Math.round((total + lineTotal) * 100) / 100;
 
           itemsToInsert.push({ productId, quantity, unitPrice, lineTotal });
+        }
+
+        if (status === 'completed') {
+          for (const it of itemsToInsert) {
+            const product = productById.get(it.productId)!;
+            if (product.stock < it.quantity) {
+              throw new HttpError(409, `Insufficient stock for product ${it.productId}`);
+            }
+          }
         }
 
         const [saleRow] = await tx
@@ -147,7 +151,7 @@ export const salesController = {
           .values({
             userId: input.userId,
             status,
-            total
+            total: String(total)
           })
           .returning();
 
@@ -156,24 +160,17 @@ export const salesController = {
             saleId: saleRow.id,
             productId: it.productId,
             quantity: it.quantity,
-            unitPrice: it.unitPrice,
-            lineTotal: it.lineTotal
+            unitPrice: String(it.unitPrice),
+            lineTotal: String(it.lineTotal)
           }))
         );
 
         if (status === 'completed') {
           for (const it of itemsToInsert) {
-            const product = productById.get(it.productId);
-            if (!product) throw new HttpError(400, 'One or more products not found');
-            if (product.stock < it.quantity) {
-              throw new HttpError(409, `Insufficient stock for product ${it.productId}`);
-            }
-          }
-
-          for (const it of itemsToInsert) {
-            const product = productById.get(it.productId)!;
-            const newStock = product.stock - it.quantity;
-            await tx.update(products).set({ stock: newStock }).where(eq(products.id, it.productId));
+            await tx
+              .update(products)
+              .set({ stock: sql`${products.stock} - ${it.quantity}` })
+              .where(eq(products.id, it.productId));
           }
         }
 
@@ -189,14 +186,15 @@ export const salesController = {
 
   async complete(req: Request, res: Response, next: NextFunction) {
     try {
-      const id = Number(req.params.id);
-      if (!Number.isInteger(id) || id <= 0) throw new HttpError(400, 'Invalid id');
+      const id = parseId(req);
 
       const updatedId = await db.transaction(async (tx) => {
         const [saleRow] = await tx.select().from(sales).where(eq(sales.id, id)).limit(1);
         if (!saleRow) throw new HttpError(404, 'Sale not found');
 
-        if (saleRow.status === 'completed') throw new HttpError(409, 'Sale already completed');
+        if (saleRow.status !== 'pending') {
+          throw new HttpError(409, `Cannot complete a sale with status "${saleRow.status}"`);
+        }
 
         const itemRows = await tx
           .select({ productId: saleItems.productId, quantity: saleItems.quantity })
@@ -230,12 +228,13 @@ export const salesController = {
           }
         }
 
-        await tx.update(sales).set({ status: 'completed' }).where(eq(sales.id, id)).returning();
+        await tx.update(sales).set({ status: 'completed' }).where(eq(sales.id, id));
 
         for (const [productId, quantity] of qtyByProduct.entries()) {
-          const product = productById.get(productId)!;
-          const newStock = product.stock - quantity;
-          await tx.update(products).set({ stock: newStock }).where(eq(products.id, productId));
+          await tx
+            .update(products)
+            .set({ stock: sql`${products.stock} - ${quantity}` })
+            .where(eq(products.id, productId));
         }
 
         return id;

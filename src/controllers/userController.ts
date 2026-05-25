@@ -1,9 +1,10 @@
 import type { NextFunction, Request, Response } from 'express';
 import { z } from 'zod';
-import { and, eq } from 'drizzle-orm';
+import { eq } from 'drizzle-orm';
 import { db } from '../db';
 import { users } from '../db/schema';
 import { HttpError } from '../middleware/errorHandler';
+import { parsePagination, parseId } from '../utils/params';
 
 const createUserSchema = z.object({
   name: z.string().min(1).max(200),
@@ -22,9 +23,7 @@ const updateUserSchema = z
 export const userController = {
   async list(req: Request, res: Response, next: NextFunction) {
     try {
-      const limit = Math.min(Number(req.query.limit ?? 50), 200);
-      const offset = Math.max(Number(req.query.offset ?? 0), 0);
-
+      const { limit, offset } = parsePagination(req);
       const rows = await db.select().from(users).limit(limit).offset(offset).orderBy(users.id);
       res.json({ data: rows });
     } catch (err) {
@@ -34,13 +33,9 @@ export const userController = {
 
   async getById(req: Request, res: Response, next: NextFunction) {
     try {
-      const id = Number(req.params.id);
-      if (!Number.isInteger(id) || id <= 0) throw new HttpError(400, 'Invalid id');
-
-      const rows = await db.select().from(users).where(eq(users.id, id));
-      const user = rows[0];
+      const id = parseId(req);
+      const [user] = await db.select().from(users).where(eq(users.id, id)).limit(1);
       if (!user) throw new HttpError(404, 'User not found');
-
       res.json({ data: user });
     } catch (err) {
       next(err);
@@ -51,7 +46,7 @@ export const userController = {
     try {
       const input = createUserSchema.parse(req.body);
 
-      const rows = await db
+      const [created] = await db
         .insert(users)
         .values({
           name: input.name,
@@ -59,7 +54,7 @@ export const userController = {
         })
         .returning();
 
-      res.status(201).json({ data: rows[0] });
+      res.status(201).json({ data: created });
     } catch (err) {
       next(err);
     }
@@ -67,8 +62,7 @@ export const userController = {
 
   async update(req: Request, res: Response, next: NextFunction) {
     try {
-      const id = Number(req.params.id);
-      if (!Number.isInteger(id) || id <= 0) throw new HttpError(400, 'Invalid id');
+      const id = parseId(req);
       const input = updateUserSchema.parse(req.body);
 
       const [existing] = await db.select().from(users).where(eq(users.id, id)).limit(1);
@@ -78,8 +72,12 @@ export const userController = {
       if (input.name !== undefined) updatePayload.name = input.name;
       if (input.email !== undefined) updatePayload.email = input.email;
 
-      const rows = await db.update(users).set(updatePayload).where(and(eq(users.id, id))).returning();
-      res.json({ data: rows[0] });
+      const [updated] = await db
+        .update(users)
+        .set(updatePayload)
+        .where(eq(users.id, id))
+        .returning();
+      res.json({ data: updated });
     } catch (err) {
       next(err);
     }
@@ -87,12 +85,9 @@ export const userController = {
 
   async remove(req: Request, res: Response, next: NextFunction) {
     try {
-      const id = Number(req.params.id);
-      if (!Number.isInteger(id) || id <= 0) throw new HttpError(400, 'Invalid id');
-
+      const id = parseId(req);
       const rows = await db.delete(users).where(eq(users.id, id)).returning();
       if (rows.length === 0) throw new HttpError(404, 'User not found');
-
       res.json({ data: { deleted: true, id } });
     } catch (err) {
       next(err);
